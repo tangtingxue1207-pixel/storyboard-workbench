@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+  background: #f7f4ee;
+  color: #151515;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.storyboard-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #a8a29a transparent;
+}
+
+.storyboard-scrollbar::-webkit-scrollbar {
+  width: 10px;
+}
+
+.storyboard-scrollbar::-webkit-scrollbar-thumb {
+  background: #a8a29a;
+  border-radius: 999px;
+}
