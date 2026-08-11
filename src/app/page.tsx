@@ -33,6 +33,7 @@ type AnnotationTool = "select" | "text" | "arrow" | "rect";
 type GridCropBox = CropRect & { id: string; index: number; confidence: number; source: "auto-detect" | "manual-adjust" };
 type GridCropFrame = CropRect & { confidence: number; source: "auto-detect" | "manual-adjust" };
 type LibTvGridState = { imageUrl: string; width: number; height: number; frame: GridCropFrame; autoFrame: GridCropFrame; targetShotIds: string[]; warning: string };
+type GridTargetPickerState = LibTvGridState & { candidateShotIds: string[]; selectedTargetIds: string[] };
 type PromptParts = {
   imageType?: string;
   subject?: string;
@@ -164,6 +165,7 @@ export default function Home() {
   const [pptxPreviewShots, setPptxPreviewShots] = useState<WorkShot[] | null>(null);
   const [xlsxPreviewRows, setXlsxPreviewRows] = useState<XlsxPreviewRow[] | null>(null);
   const [libTvGrid, setLibTvGrid] = useState<LibTvGridState | null>(null);
+  const [gridTargetPicker, setGridTargetPicker] = useState<GridTargetPickerState | null>(null);
   const [selectedImageShotId, setSelectedImageShotId] = useState<string | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -557,33 +559,62 @@ function updateAsset(id: string, patch: Partial<Asset>) {
     setNotice(`已按顺序回填 ${updates.length} 张图片`);
   }
 
-  async function openLibTvGridCrop(file: File) {
-    const imageUrl = await fileToDataUrl(file);
+  async function openLibTvGridCropFromCurrentImage(imageUrl: string) {
+    if (!imageUrl) {
+      setNotice("当前镜头还没有图片，请先上传或粘贴一张 LibTV 九宫格图。");
+      return;
+    }
     const size = await imageSizeFromDataUrl(imageUrl).catch(() => ({ width: 0, height: 0 }));
     if (!size.width || !size.height) {
-      setNotice("九宫格图片读取失败，请换一张图片重试。");
+      setNotice("当前图片读取失败，请换一张九宫格图片重试。");
       return;
     }
     const detected = await detectLibTvGridFrame(imageUrl, size.width, size.height);
-    const targetShots = selectedCopyShots.length ? selectedCopyShots : currentBatch?.shots?.length ? currentBatch.shots : activeShot ? [activeShot] : [];
-    if (!targetShots.length) {
+    const visibleShots = visibleShotsForSelection(orderedShots, sceneGroups, viewMode);
+    const activeIndex = activeShot ? visibleShots.findIndex((shot) => shot.id === activeShot.id) : -1;
+    const activeWindow = activeIndex >= 0 ? visibleShots.slice(activeIndex, activeIndex + 9) : [];
+    const defaultShots = selectedCopyShots.length ? selectedCopyShots : currentBatch?.shots?.length ? currentBatch.shots : activeWindow.length ? activeWindow : activeShot ? [activeShot] : [];
+    const candidateShotIds = unique([...defaultShots.map((shot) => shot.id), ...visibleShots.map((shot) => shot.id)]);
+    if (!candidateShotIds.length) {
       setNotice("请先选择需要回填的镜头。");
       return;
     }
-    setLibTvGrid({
+    const defaultTargetIds = defaultShots.slice(0, 9).map((shot) => shot.id);
+    setGridTargetPicker({
       imageUrl,
       width: size.width,
       height: size.height,
       frame: detected.frame,
       autoFrame: detected.frame,
-      targetShotIds: targetShots.slice(0, 9).map((shot) => shot.id),
+      targetShotIds: defaultTargetIds,
+      candidateShotIds,
+      selectedTargetIds: defaultTargetIds,
       warning: detected.warning,
     });
+  }
+
+  function confirmGridTargetSelection(state: GridTargetPickerState) {
+    if (!state.selectedTargetIds.length) {
+      setNotice("请至少勾选一个需要回填的镜头。");
+      return;
+    }
+    setLibTvGrid({
+      imageUrl: state.imageUrl,
+      width: state.width,
+      height: state.height,
+      frame: state.frame,
+      autoFrame: state.autoFrame,
+      targetShotIds: state.selectedTargetIds.slice(0, 9),
+      warning: state.warning,
+    });
+    setGridTargetPicker(null);
   }
 
   async function confirmLibTvGridCrop(state: LibTvGridState) {
     const cropped = await cropImageByGridFrame(state.imageUrl, state.frame);
     const pairs = state.targetShotIds.slice(0, cropped.length).map((id, index) => ({ id, imageUrl: cropped[index] }));
+    const lockedShots = shots.filter((shot) => pairs.some((pair) => pair.id === shot.id) && shot.imageLocked);
+    if (lockedShots.length && !window.confirm(`有 ${lockedShots.length} 个目标镜头图片已锁定，是否覆盖？`)) return;
     setShots((current) =>
       current.map((shot) => {
         const update = pairs.find((item) => item.id === shot.id);
@@ -1026,7 +1057,7 @@ function updateAsset(id: string, patch: Partial<Asset>) {
                 onSelectImage={() => setSelectedImageShotId(activeShot.id)}
                 onImage={(file) => void fillShotImage(activeShot.id, file, "upload")}
                 onDropImages={(files) => void fillBatchImages(currentBatch?.shots || [activeShot], files, "drag_drop")}
-                onLibTvGrid={(file) => void openLibTvGridCrop(file)}
+                onLibTvGrid={() => void openLibTvGridCropFromCurrentImage(activeShot.imageUrl)}
                 hasAnyAnnotations={shots.some((shot) => (shot.annotations || []).length > 0)}
                 onClearAllAnnotations={() => setShots((current) => current.map((shot) => ({ ...shot, annotations: [], annotatedImage: "" })))}
               />
@@ -1076,6 +1107,15 @@ function updateAsset(id: string, patch: Partial<Asset>) {
           onExport={() => void exportXlsx(xlsxPreviewRows)}
         />
       ) : null}
+      {gridTargetPicker ? (
+        <GridTargetPickerModal
+          state={gridTargetPicker}
+          shots={shots}
+          onChange={setGridTargetPicker}
+          onClose={() => setGridTargetPicker(null)}
+          onConfirm={() => confirmGridTargetSelection(gridTargetPicker)}
+        />
+      ) : null}
       {libTvGrid ? (
         <LibTvGridCropModal
           state={libTvGrid}
@@ -1122,7 +1162,7 @@ function ShotEditor({
   onSelectImage: () => void;
   onImage: (file: File) => void;
   onDropImages: (files: File[]) => void;
-  onLibTvGrid: (file: File) => void;
+  onLibTvGrid: () => void;
   hasAnyAnnotations: boolean;
   onClearAllAnnotations: () => void;
 }) {
@@ -1544,19 +1584,7 @@ function ShotEditor({
             }}
           />
         </label>
-        <label className="inline-flex cursor-pointer items-center gap-2 border border-[#d7d1c7] bg-white px-3 py-2 text-sm font-semibold hover:border-[#0f766e]">
-          <ImagePlus className="h-4 w-4" /> 九宫格裁切
-          <input
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) onLibTvGrid(file);
-              event.currentTarget.value = "";
-            }}
-          />
-        </label>
+        <IconButton disabled={!shot.imageUrl} onClick={onLibTvGrid} icon={<ImagePlus className="h-4 w-4" />} label="九宫格裁切" />
         {isCropping ? (
           <>
             <label className="inline-flex items-center gap-2 border border-[#d7d1c7] bg-white px-3 py-2 text-sm font-semibold">
@@ -1774,6 +1802,80 @@ function PptxPreviewModal({ shots, ratio, onRatio, onChange, onClose, onExport }
               </div>
             </section>
           ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GridTargetPickerModal({ state, shots, onChange, onClose, onConfirm }: { state: GridTargetPickerState; shots: WorkShot[]; onChange: (state: GridTargetPickerState) => void; onClose: () => void; onConfirm: () => void }) {
+  const shotMap = new Map(shots.map((shot) => [shot.id, shot]));
+  const candidateShots = state.candidateShotIds.map((id) => shotMap.get(id)).filter(Boolean) as WorkShot[];
+  const selectedSet = new Set(state.selectedTargetIds);
+
+  function updateSelection(ids: string[]) {
+    const orderedIds = state.candidateShotIds.filter((id) => ids.includes(id)).slice(0, 9);
+    onChange({ ...state, selectedTargetIds: orderedIds, targetShotIds: orderedIds });
+  }
+
+  function toggleShot(id: string) {
+    if (selectedSet.has(id)) {
+      updateSelection(state.selectedTargetIds.filter((item) => item !== id));
+      return;
+    }
+    if (state.selectedTargetIds.length >= 9) return;
+    updateSelection([...state.selectedTargetIds, id]);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/55 p-5">
+      <div className="mx-auto flex max-h-full max-w-3xl flex-col border border-[#d7d1c7] bg-[#fbfaf7] shadow-xl">
+        <div className="flex items-start justify-between gap-3 border-b border-[#d7d1c7] px-4 py-3">
+          <div>
+            <h2 className="text-lg font-semibold">选择九宫格回填镜头</h2>
+            <p className="mt-1 text-xs text-[#667085]">最多勾选 9 个镜头，确认裁切后将按下方列表顺序依次回填。</p>
+          </div>
+          <ToolbarButton onClick={onClose}>取消</ToolbarButton>
+        </div>
+        <div className="grid min-h-0 grid-cols-[180px_minmax(0,1fr)] gap-4 p-4">
+          <div className="grid content-start gap-2">
+            <div className="border border-[#d7d1c7] bg-white p-2">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={state.imageUrl} alt="当前九宫格图片" className="max-h-40 w-full object-contain" />
+            </div>
+            <p className="text-xs leading-5 text-[#667085]">当前图片将作为九宫格源图，不会再弹出本地文件选择。</p>
+          </div>
+          <div className="min-h-0">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <span className="text-sm font-semibold">已选择 {state.selectedTargetIds.length}/9</span>
+              <div className="flex gap-2">
+                <ToolbarButton onClick={() => updateSelection(state.candidateShotIds.slice(0, 9))}>选择前 9 个</ToolbarButton>
+                <ToolbarButton onClick={() => updateSelection([])}>清空</ToolbarButton>
+              </div>
+            </div>
+            <div className="storyboard-scrollbar max-h-[52vh] overflow-y-auto border border-[#d7d1c7] bg-white">
+              {candidateShots.map((shot) => {
+                const checked = selectedSet.has(shot.id);
+                const disabled = !checked && state.selectedTargetIds.length >= 9;
+                return (
+                  <label key={shot.id} className={`flex cursor-pointer items-start gap-3 border-b border-[#eee8dd] px-3 py-2 text-sm last:border-b-0 ${disabled ? "opacity-45" : "hover:bg-[#f6f3ed]"}`}>
+                    <input type="checkbox" checked={checked} disabled={disabled} onChange={() => toggleShot(shot.id)} className="mt-1" />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-2 font-semibold">
+                        镜头 {shot.originalShotNo}
+                        {shot.imageLocked ? <Lock className="h-3.5 w-3.5 text-[#667085]" /> : null}
+                      </span>
+                      <span className="mt-1 block truncate text-xs text-[#667085]">{shot.scene || "未识别场景"} · {shot.scriptText || "未填写画面内容"}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-[#d7d1c7] px-4 py-3">
+          <ToolbarButton onClick={onClose}>取消</ToolbarButton>
+          <IconButton disabled={!state.selectedTargetIds.length} onClick={onConfirm} icon={<Crop className="h-4 w-4" />} label="下一步：调整裁切框" strong />
         </div>
       </div>
     </div>
